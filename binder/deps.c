@@ -14,8 +14,6 @@
 
 #include "deps.h"
 
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0))
-
 #ifndef CONFIG_KPROBES
 # error "Your kernel does not support KProbes, but this is required to compile binder as a kernel module on kernel 5.7 and later"
 #endif
@@ -44,7 +42,6 @@ static kallsyms_lookup_name_t get_kallsyms_lookup_name_ptr(void)
 
 	return addr;
 }
-#endif
 
 /*
  * On kernel 5.7 and later, kallsyms_lookup_name() can no longer be called from a kernel
@@ -59,44 +56,21 @@ static kallsyms_lookup_name_t get_kallsyms_lookup_name_ptr(void)
  */
 static unsigned long kallsyms_lookup_name_wrapper(const char *name)
 {
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0))
 	static kallsyms_lookup_name_t func_ptr = NULL;
 	if (!func_ptr)
 		func_ptr = get_kallsyms_lookup_name_ptr();
 
 	return func_ptr(name);
-#else
-	return kallsyms_lookup_name(name);
-#endif
 }
 
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,19,0))
-static struct file *(*close_fd_get_file_ptr)(unsigned int fd)
-#else
-static int (*close_fd_get_file_ptr)(unsigned int fd, struct file **res)
-#endif
-        = NULL;
+static struct file *(*close_fd_get_file_ptr)(unsigned int fd) = NULL;
 
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,19,0))
 struct file *close_fd_get_file(unsigned int fd)
-#elif (LINUX_VERSION_CODE >= KERNEL_VERSION(5,11,0))
-int close_fd_get_file(unsigned int fd, struct file **res)
-#else
-int __close_fd_get_file(unsigned int fd, struct file **res)
-#endif
 {
 	if (!close_fd_get_file_ptr)
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,11,0))
 		close_fd_get_file_ptr = kallsyms_lookup_name_wrapper("close_fd_get_file");
-#else
-		close_fd_get_file_ptr = kallsyms_lookup_name_wrapper("__close_fd_get_file");
-#endif
 
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,19,0))
     return close_fd_get_file_ptr(fd);
-#else
-	return close_fd_get_file_ptr(fd, res);
-#endif
 }
 
 static int (*can_nice_ptr)(const struct task_struct *, const int) = NULL;
@@ -164,13 +138,14 @@ int task_work_add(struct task_struct *task, struct callback_head *work,
 	return task_work_add_ptr(task, work, notify);
 }
 
-static void (*zap_page_range_ptr)(struct vm_area_struct *, unsigned long, unsigned long) = NULL;
+struct zap_details;
+static void (*zap_page_range_single_ptr)(struct vm_area_struct *, unsigned long, unsigned long, struct zap_details *) = NULL;
 
-void zap_page_range(struct vm_area_struct *vma, unsigned long address, unsigned long size)
+void zap_page_range_single(struct vm_area_struct *vma, unsigned long address, unsigned long size, struct zap_details *details)
 {
-	if (!zap_page_range_ptr)
-		zap_page_range_ptr = kallsyms_lookup_name_wrapper("zap_page_range");
-	zap_page_range_ptr(vma, address, size);
+	if (!zap_page_range_single_ptr)
+		zap_page_range_single_ptr = kallsyms_lookup_name_wrapper("zap_page_range_single");
+	zap_page_range_single_ptr(vma, address, size, details);
 }
 
 static void (*put_ipc_ns_ptr)(struct ipc_namespace *ns) = NULL;
@@ -190,3 +165,14 @@ struct ipc_namespace *get_init_ipc_ns_ptr(void)
 		init_ipc_ns_ptr = kallsyms_lookup_name_wrapper("init_ipc_ns");
 	return init_ipc_ns_ptr;
 }
+
+static void (*__binder_wake_up_pollfree_ptr)(struct wait_queue_head *) = NULL;
+
+void __binder_wake_up_pollfree(struct wait_queue_head *wq_head)
+{
+	if (!__binder_wake_up_pollfree_ptr)
+		__binder_wake_up_pollfree_ptr = kallsyms_lookup_name_wrapper("__wake_up_pollfree");
+	__binder_wake_up_pollfree_ptr(wq_head);
+}
+
+

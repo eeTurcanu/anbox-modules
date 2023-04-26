@@ -1,4 +1,5 @@
-ccflags-y += -I$(src) -Wno-int-conversion -DCONFIG_ANDROID_BINDER_DEVICES="\"binder\"" -DCONFIG_ANDROID_BINDERFS="y"
+# SPDX-License-Identifier: GPL-2.0-only
+ccflags-y += -I$(src) -Wno-int-conversion -DCONFIG_ANDROID_BINDER_DEVICES="\"\"" -DCONFIG_ANDROID_BINDERFS="y"
 obj-m := binder_linux.o
 binder_linux-y := deps.o binder.o binder_alloc.o binderfs.o
 

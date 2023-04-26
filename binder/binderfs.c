@@ -60,6 +60,11 @@ enum binderfs_stats_mode {
 	binderfs_stats_mode_global,
 };
 
+struct binder_features {
+	bool oneway_spam_detection;
+	bool extended_error;
+};
+
 static const struct constant_table binderfs_param_stats[] = {
 	{ "global", binderfs_stats_mode_global },
 	{}
@@ -69,6 +74,11 @@ static const struct fs_parameter_spec binderfs_fs_parameters[] = {
 	fsparam_u32("max",	Opt_max),
 	fsparam_enum("stats",	Opt_stats_mode, binderfs_param_stats),
 	{}
+};
+
+static struct binder_features binder_features = {
+	.oneway_spam_detection = true,
+	.extended_error = true,
 };
 
 static inline struct binderfs_info *BINDERFS_SB(const struct super_block *sb)
@@ -215,7 +225,7 @@ err:
 }
 
 /**
- * binderfs_ctl_ioctl - handle binder device node allocation requests
+ * binder_ctl_ioctl - handle binder device node allocation requests
  *
  * The request handler for the binder-control device. All requests operate on
  * the binderfs mount the binder-control device resides in:
@@ -357,24 +367,22 @@ static inline bool is_binderfs_control_device(const struct dentry *dentry)
 	return info->control_dentry == dentry;
 }
 
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,12,0))
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6,2,0))
+static int binderfs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
+#else
 static int binderfs_rename(struct user_namespace *namespace, struct inode *old_dir,
+#endif
 			   struct dentry *old_dentry, struct inode *new_dir,
 			   struct dentry *new_dentry, unsigned int flags)
-#else
-static int binderfs_rename(struct inode *old_dir, struct dentry *old_dentry,
-			   struct inode *new_dir, struct dentry *new_dentry,
-			   unsigned int flags)
-#endif
 {
 	if (is_binderfs_control_device(old_dentry) ||
 	    is_binderfs_control_device(new_dentry))
 		return -EPERM;
 
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,12,0))
-	return simple_rename(namespace, old_dir, old_dentry, new_dir, new_dentry, flags);
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6,2,0))
+	return simple_rename(idmap, old_dir, old_dentry, new_dir, new_dentry, flags);
 #else
-	return simple_rename(old_dir, old_dentry, new_dir, new_dentry, flags);
+	return simple_rename(namespace, old_dir, old_dentry, new_dir, new_dentry, flags);
 #endif
 }
 
@@ -593,9 +601,43 @@ out:
 	return dentry;
 }
 
+static int binder_features_show(struct seq_file *m, void *unused)
+{
+	bool *feature = m->private;
+
+	seq_printf(m, "%d\n", *feature);
+
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(binder_features);
+
+static int init_binder_features(struct super_block *sb)
+{
+	struct dentry *dentry, *dir;
+
+	dir = binderfs_create_dir(sb->s_root, "features");
+	if (IS_ERR(dir))
+		return PTR_ERR(dir);
+
+	dentry = binderfs_create_file(dir, "oneway_spam_detection",
+				      &binder_features_fops,
+				      &binder_features.oneway_spam_detection);
+	if (IS_ERR(dentry))
+		return PTR_ERR(dentry);
+
+	dentry = binderfs_create_file(dir, "extended_error",
+				      &binder_features_fops,
+				      &binder_features.extended_error);
+	if (IS_ERR(dentry))
+		return PTR_ERR(dentry);
+
+	return 0;
+}
+
 static int init_binder_logs(struct super_block *sb)
 {
 	struct dentry *binder_logs_root_dir, *dentry, *proc_log_dir;
+	const struct binder_debugfs_entry *db_entry;
 	struct binderfs_info *info;
 	int ret = 0;
 
@@ -606,43 +648,15 @@ static int init_binder_logs(struct super_block *sb)
 		goto out;
 	}
 
-	dentry = binderfs_create_file(binder_logs_root_dir, "stats",
-				      &binder_stats_fops, NULL);
-	if (IS_ERR(dentry)) {
-		ret = PTR_ERR(dentry);
-		goto out;
-	}
-
-	dentry = binderfs_create_file(binder_logs_root_dir, "state",
-				      &binder_state_fops, NULL);
-	if (IS_ERR(dentry)) {
-		ret = PTR_ERR(dentry);
-		goto out;
-	}
-
-	dentry = binderfs_create_file(binder_logs_root_dir, "transactions",
-				      &binder_transactions_fops, NULL);
-	if (IS_ERR(dentry)) {
-		ret = PTR_ERR(dentry);
-		goto out;
-	}
-
-	dentry = binderfs_create_file(binder_logs_root_dir,
-				      "transaction_log",
-				      &binder_transaction_log_fops,
-				      &binder_transaction_log);
-	if (IS_ERR(dentry)) {
-		ret = PTR_ERR(dentry);
-		goto out;
-	}
-
-	dentry = binderfs_create_file(binder_logs_root_dir,
-				      "failed_transaction_log",
-				      &binder_transaction_log_fops,
-				      &binder_transaction_log_failed);
-	if (IS_ERR(dentry)) {
-		ret = PTR_ERR(dentry);
-		goto out;
+	binder_for_each_debugfs_entry(db_entry) {
+		dentry = binderfs_create_file(binder_logs_root_dir,
+					      db_entry->name,
+					      db_entry->fops,
+					      db_entry->data);
+		if (IS_ERR(dentry)) {
+			ret = PTR_ERR(dentry);
+			goto out;
+		}
 	}
 
 	proc_log_dir = binderfs_create_dir(binder_logs_root_dir, "proc");
@@ -733,6 +747,10 @@ static int binderfs_fill_super(struct super_block *sb, struct fs_context *fc)
 			name++;
 	}
 
+	ret = init_binder_features(sb);
+	if (ret)
+		return ret;
+
 	if (info->mount_opts.stats_mode == binderfs_stats_mode_global)
 		return init_binder_logs(sb);
 
@@ -775,11 +793,27 @@ static int binderfs_init_fs_context(struct fs_context *fc)
 	return 0;
 }
 
+static void binderfs_kill_super(struct super_block *sb)
+{
+	struct binderfs_info *info = sb->s_fs_info;
+
+	/*
+	 * During inode eviction struct binderfs_info is needed.
+	 * So first wipe the super_block then free struct binderfs_info.
+	 */
+	kill_litter_super(sb);
+
+	if (info && info->ipc_ns)
+		put_ipc_ns(info->ipc_ns);
+
+	kfree(info);
+}
+
 static struct file_system_type binder_fs_type = {
 	.name			= "binder",
 	.init_fs_context	= binderfs_init_fs_context,
 	.parameters		= binderfs_fs_parameters,
-	.kill_sb		= kill_litter_super,
+	.kill_sb		= binderfs_kill_super,
 	.fs_flags		= FS_USERNS_MOUNT,
 };
 
